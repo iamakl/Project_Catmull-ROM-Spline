@@ -1,105 +1,133 @@
 #include <iostream>
+#include <fstream>
+#include <vector>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <GL/glew.h>
+#include <GLFW/glfw3.h>
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
-#include "CatmullRomSpline.h"
+// Function to read points from a text file and store them in a vector
+std::vector<glm::vec3> readPointsFromFile(const std::string& filename) {
+    std::vector<glm::vec3> points;
+    std::ifstream file(filename);
 
-namespace {
-    const GLuint POS_VAO_ID = 0;
-    const GLuint STRIDE = 3;
-}
-
-CatmullRomSpline::CatmullRomSpline()
-    : points_{}
-    , ebo_{} {
-    // initialize GPU objects
-    glGenVertexArrays(1, &vao_id_);
-    glGenBuffers(1, &vbo_id_);
-    glGenBuffers(1, &ebo_id_);
-    glBindVertexArray(vao_id_);
-
-    // load empty points vector
-    loadPoints();
-
-    // position attribute
-    glVertexAttribPointer(POS_VAO_ID, 3, GL_FLOAT, GL_FALSE,
-                          STRIDE * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(POS_VAO_ID);
-
-    // Determine max vertices in a patch
-    GLint maxPatchVertices = 0;
-    glGetIntegerv(GL_MAX_PATCH_VERTICES, &maxPatchVertices);
-    std::cout << "Max supported patch vertices " << maxPatchVertices << std::endl;
-}
-
-CatmullRomSpline::~CatmullRomSpline() {
-    glDeleteVertexArrays(1, &vao_id_);
-    glDeleteBuffers(1, &vbo_id_);
-    glDeleteBuffers(1, &ebo_id_);
-}
-
-bool CatmullRomSpline::initShaders() {
-    if (tessShaderProgram_.linkShaders(
-                "data/spline_vertex.glsl",
-                "data/spline_tess_control.glsl",
-                "data/spline_tess_eval.glsl",
-                "data/spline_fragment.glsl")) {
-        std::cout << "Spline tesselation shaders successfully initalized" << std::endl;
+    if (!file.is_open()) {
+        std::cerr << "Error opening file: " << filename << std::endl;
+        return points; // Return an empty vector on failure
     }
 
-    if (pointsShaderProgram_.linkShaders(
-                "data/spline_vertex.glsl",
-                "",
-                "",
-                "data/spline_fragment.glsl")) {
-        std::cout << "Spline point shaders successfully initalized" << std::endl;
-        return true;
+    float x, y, z;
+    while (file >> x >> y >> z) {
+        points.push_back(glm::vec3(x, y, z));
     }
 
-    std::cerr << "Image shaders failed to initialize" << std::endl;
-    return false;
+    file.close();
+    return points;
 }
 
-void CatmullRomSpline::addPoint(float x, float y) {
-    points_.push_back(x);
-    points_.push_back(y);
-    points_.push_back(0.f); // z
+// Function to calculate points on the Catmull-Rom Spline
+std::vector<glm::vec3> calculateCatmullRomSpline(const std::vector<glm::vec3>& controlPoints) {
+    std::vector<glm::vec3> splinePoints;
 
-    if (points_.size() <= 4 * 3) {
-        // first patch
-        ebo_.push_back(points_.size() / 3 - 1);
-    } else {
-        ebo_.push_back(points_.size() / 3 - 4);
-        ebo_.push_back(points_.size() / 3 - 3);
-        ebo_.push_back(points_.size() / 3 - 2);
-        ebo_.push_back(points_.size() / 3 - 1);
+    for (int i = 1; i < controlPoints.size() - 2; ++i) {
+        for (float t = 0.0; t <= 1.0; t += 0.01) {
+            glm::vec3 point = calculateCatmullRomPoint(t, controlPoints[i - 1], controlPoints[i], controlPoints[i + 1], controlPoints[i + 2]);
+            splinePoints.push_back(point);
+        }
     }
 
-    loadPoints();
+    return splinePoints;
 }
 
-void CatmullRomSpline::render() {
-    glBindVertexArray(vao_id_);
+// Function to calculate a point on the Catmull-Rom spline
+glm::vec3 calculateCatmullRomPoint(float t, const glm::vec3& p0, const glm::vec3& p1, const glm::vec3& p2, const glm::vec3& p3) {
+    float t2 = t * t;
+    float t3 = t2 * t;
 
-    // draw control points
-    pointsShaderProgram_.use();
-    glPointSize(7);
-    glDrawArrays(GL_POINTS, 0, points_.size() / STRIDE);
+    float b0 = 0.5 * (-t3 + 2 * t2 - t);
+    float b1 = 0.5 * (3 * t3 - 5 * t2 + 2);
+    float b2 = 0.5 * (-3 * t3 + 4 * t2 + t);
+    float b3 = 0.5 * (t3 - t2);
 
-    // draw tessallation
-    tessShaderProgram_.use();
-    glPatchParameteri(GL_PATCH_VERTICES, 4);
-    glLineWidth(100.f);
-    glDrawElements(GL_PATCHES, ebo_.size(), GL_UNSIGNED_INT, 0);
+    return b0 * p0 + b1 * p1 + b2 * p2 + b3 * p3;
 }
 
-/* PRIVATE */
+// Function to load a texture from file and bind it to OpenGL
+GLuint loadTexture(const std::string& filename) {
+    int width, height, channels;
+    unsigned char* image = stbi_load(filename.c_str(), &width, &height, &channels, STBI_rgb);
 
-void CatmullRomSpline::loadPoints() {
-    glBindVertexArray(vao_id_);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_id_);
-    glBufferData(GL_ARRAY_BUFFER, points_.size() * sizeof(float),
-                 &points_.front(), GL_STATIC_DRAW);
+    if (!image) {
+        std::cerr << "Error loading texture: " << filename << std::endl;
+        return 0;
+    }
 
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_id_);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, ebo_.size() * sizeof(GLuint),
-                 &ebo_.front(), GL_STATIC_DRAW);
+    GLuint textureID;
+    glGenTextures(1, &textureID);
+    glBindTexture(GL_TEXTURE_2D, textureID);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, image);
+    glGenerateMipmap(GL_TEXTURE_2D);
+
+    stbi_image_free(image);
+
+    return textureID;
+}
+
+int main() {
+    // Initialize GLFW
+    if (!glfwInit()) {
+        std::cerr << "Failed to initialize GLFW" << std::endl;
+        return -1;
+    }
+
+    // Create a windowed mode window and its OpenGL context
+    GLFWwindow* window = glfwCreateWindow(800, 600, "Catmull-Rom Spline", NULL, NULL);
+    if (!window) {
+        glfwTerminate();
+        return -1;
+    }
+
+    // Make the window's context current
+    glfwMakeContextCurrent(window);
+
+    // Initialize GLEW
+    if (glewInit() != GLEW_OK) {
+        std::cerr << "Failed to initialize GLEW" << std::endl;
+        return -1;
+    }
+
+    // Set up OpenGL rendering properties
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+
+    // Read points from file (dummy data for now)
+    std::vector<Point> controlPoints = readPointsFromFile("path/to/points.txt");
+
+    // Calculate spline points
+    std::vector<Point> splinePoints = calculateCatmullRomSpline(controlPoints, 100);
+
+    // Main rendering loop
+    while (!glfwWindowShouldClose(window)) {
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        // Render spline (dummy rendering for now)
+        glBegin(GL_LINE_STRIP);
+        glColor3f(1.0f, 1.0f, 1.0f);
+
+        for (const auto& point : splinePoints) {
+            glVertex3f(point.x, point.y, point.z);
+        }
+
+        glEnd();
+
+        glfwSwapBuffers(window);
+        glfwPollEvents();
+    }
+
+    // Cleanup
+    glfwDestroyWindow(window);
+    glfwTerminate();
+
+    return 0;
 }
